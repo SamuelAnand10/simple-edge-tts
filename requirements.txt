@@ -1,7 +1,5 @@
-streamlit
-gtts
+streamlit>=1.24.0
+gTTS>=2.3.0
 SpeechRecognition>=3.8.1
 pydub>=0.25.1
-streamlit-audio-recorder>=0.1.6 
-
-
+streamlit-audio-recorder>=0.1.6
