@@ -42,9 +42,3 @@ if st.button("Speak"):
     mp3_path = synthesize_to_file(text, voice)
     autoplay_html(mp3_path)
     st.success("Done! Audio should autoplay 🎧🔥")
-
-
-if st.button("Speak"):
-    mp3_path = synthesize_to_file(text, voice)
-    autoplay_html(mp3_path)
-    st.success("Done! Audio should autoplay 🎧🔥")
