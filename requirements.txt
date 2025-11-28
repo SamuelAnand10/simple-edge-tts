@@ -1,6 +1,8 @@
 streamlit
 gtts
-
+SpeechRecognition
+pydub
+streamlit-audio-recorder
 
 
 
