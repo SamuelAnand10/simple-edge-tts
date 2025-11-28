@@ -6,7 +6,8 @@ import tempfile
 import threading
 import os
 import traceback
-from edge_tts import Communicate, NoAudioReceived
+from edge_tts import Communicate
+from edge_tts.communicate import NoAudioReceived
 
 st.set_page_config(page_title="Edge TTS — Autoplay Mode", layout="centered")
 
