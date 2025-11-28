@@ -12,7 +12,7 @@ def synthesize_to_file(text_or_ssml: str, voice="en-US-AriaNeural"):
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
     tmp_path = tmp.name
     tmp.close()
-    await asyncio.run(_synthesize_to_file(text_or_ssml, voice, tmp_path))
+    asyncio.run(_synthesize_to_file(text_or_ssml, voice, tmp_path))
     return tmp_path
 
 def autoplay_html(mp3_path: str):
