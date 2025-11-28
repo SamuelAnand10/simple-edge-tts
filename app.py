@@ -1,15 +1,9 @@
+# streamlit_gtts_stt_safe.py
 """
-streamlit_gtts_stt_webrtc.py
-
-- Uses streamlit-webrtc to capture microphone audio from the browser.
-- Collects a short audio clip when you click Record (non-background blocking, short duration).
-- Converts frames to WAV and transcribes using SpeechRecognition (Google Web API).
-- Puts transcript directly into the TTS text area (session_state-backed).
-- Has file upload fallback.
-
-Notes:
-- streamlit-webrtc uses WebRTC; no extra client library required beyond the package.
-- You need ffmpeg available for pydub conversions (packages.txt on Streamlit Cloud).
+Safe STT+TTS app:
+- Attempts to use streamlit-webrtc; if it errors, falls back to upload-only STT.
+- Puts transcript into TTS text area (session_state).
+- Uses SpeechRecognition (Google) and pydub for conversions.
 """
 
 import streamlit as st
@@ -17,16 +11,23 @@ from gtts import gTTS
 import tempfile, os, io, base64, time
 import numpy as np
 
-# webrtc
-from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
+# Try to import webrtc; we'll handle absence or runtime exceptions gracefully
+webrtc_available = True
+try:
+    from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
+except Exception as e:
+    webrtc_available = False
+    webrtc_import_error = e
 
-# STT
+# STT deps
 import speech_recognition as sr
 from pydub import AudioSegment
-import soundfile as sf  # to write WAV from numpy arrays
 
-st.set_page_config(page_title="gTTS + STT (webrtc)", layout="centered")
-st.title("gTTS — Autoplay Mode + STT (streamlit-webrtc)")
+# Optional: soundfile fallback removal to reduce system deps
+import soundfile as sf
+
+st.set_page_config(page_title="gTTS + STT (safe)", layout="centered")
+st.title("gTTS — Autoplay + STT (robust)")
 
 # -------------------------
 # TTS UI (session_state-backed)
@@ -69,66 +70,13 @@ if st.button("Speak (TTS)"):
 st.markdown("---")
 
 # -------------------------
-# STT UI using streamlit-webrtc
+# STT logic (webrtc attempt + fallback)
 # -------------------------
-st.header("Speech-to-Text (STT) — browser recording (webrtc) or upload")
-st.write("Click **Start WebRTC** then press **Record for 5s** to capture audio. The app will transcribe and you can push the transcript to the TTS box.")
+st.header("Speech-to-Text (STT)")
 
-# Recognizer
 recog = sr.Recognizer()
 
-# WebRTC configuration (public STUN servers). Keep default if you don't need ICE servers.
-RTC_CONFIGURATION = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
-
-webrtc_ctx = webrtc_streamer(
-    key="stt",
-    mode=WebRtcMode.SENDONLY,  # only sending audio from browser to server
-    rtc_configuration=RTC_CONFIGURATION,
-    media_stream_constraints={"audio": True, "video": False},
-    async_processing=False,
-    # suppress the built-in player UI (optional)
-    # video_html_attrs={"style": "display:none;"},
-)
-
-def frames_to_wav_bytes(frames, sample_rate=48000):
-    """
-    Convert list of av.AudioFrame-like objects (frames) to WAV bytes.
-    streamlit-webrtc gives us frames via webrtc_ctx.audio_receiver.get_frames()
-    Each frame has .to_ndarray() -> numpy array shape (n_channels, n_samples) or (n_samples,)
-    We'll concatenate them and write a WAV via soundfile.
-    """
-    # collect ndarray chunks and flatten to mono
-    chunks = []
-    sr_rate = None
-    for frame in frames:
-        try:
-            arr = frame.to_ndarray()
-        except Exception:
-            # some builds return ndarray directly as frame
-            arr = np.asarray(frame)
-        # arr can be (channels, samples) or (samples,)
-        if arr.ndim == 2:
-            # convert to mono by averaging channels
-            arr = np.mean(arr, axis=0)
-        chunks.append(arr)
-        # sample rate (frames usually have .sample_rate)
-        if sr_rate is None:
-            try:
-                sr_rate = frame.sample_rate
-            except Exception:
-                sr_rate = sample_rate
-    if not chunks:
-        return None
-    audio_np = np.concatenate(chunks).astype(np.float32)
-    if sr_rate is None:
-        sr_rate = sample_rate
-    # write to bytes WAV
-    bio = io.BytesIO()
-    sf.write(bio, audio_np, sr_rate, format="WAV")
-    return bio.getvalue()
-
 def transcribe_wav_bytes(wav_bytes: bytes) -> str:
-    # Use pydub to open bytes reliably (optional), but SpeechRecognition can read a temp wav
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
     try:
         tmp.write(wav_bytes)
@@ -148,67 +96,99 @@ def transcribe_wav_bytes(wav_bytes: bytes) -> str:
         except Exception:
             pass
 
-# Record control: user clicks a button to capture N seconds of audio from the webrtc audio receiver
-record_seconds = st.number_input("Record duration (seconds)", min_value=1, max_value=30, value=5, step=1)
+transcript = None
+last_audio_preview = None
 
-if st.button("Record for seconds (using webrtc)"):
-    if webrtc_ctx.state.playing:
-        st.info(f"Recording {record_seconds}s... please speak into your microphone")
-        # Collect frames for record_seconds
-        frames = []
-        start = time.time()
-        # Poll frames until time elapsed
-        while time.time() - start < float(record_seconds):
-            # get_frames(blocking=False) returns list; blocking mode can wait
-            try:
-                new_frames = webrtc_ctx.audio_receiver.get_frames(timeout=1.0)
-            except Exception:
-                new_frames = []
-            if new_frames:
-                frames.extend(new_frames)
-        if not frames:
-            st.error("No audio frames received. Make sure your browser allowed microphone access and try again.")
-        else:
-            st.success(f"Captured {len(frames)} frames — converting...")
-            wav_bytes = frames_to_wav_bytes(frames)
-            if wav_bytes is None:
-                st.error("Failed to convert frames to audio.")
-            else:
-                # show preview
-                st.audio(wav_bytes, format="audio/wav")
-                st.write("Transcribing...")
-                transcript = transcribe_wav_bytes(wav_bytes)
-                st.subheader("Transcription result")
-                st.write(transcript)
-                if st.button("Put transcription into TTS text area"):
-                    st.session_state["tts_text"] = transcript
-                    st.success("Transcription placed into TTS text area.")
-                    st.experimental_rerun()
-    else:
-        st.error("Start the WebRTC streamer first by clicking 'Start' in the top-right of the WebRTC box.")
-
-# ---------- Fallback: upload audio file ----------
-st.markdown("---")
-st.subheader("Or upload an audio file (wav, mp3, m4a, webm)")
-uploaded = st.file_uploader("Upload audio", type=["wav", "mp3", "m4a", "webm"])
-if uploaded is not None:
-    st.write("Processing upload...")
-    bytes_in = uploaded.read()
-    # Convert to wav bytes with pydub to normalize
+# --- Try webrtc, but guard against runtime errors ---
+if webrtc_available:
     try:
-        seg = AudioSegment.from_file(io.BytesIO(bytes_in))
+        RTC_CONFIGURATION = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
+        webrtc_ctx = webrtc_streamer(
+            key="stt",
+            mode=WebRtcMode.SENDONLY,
+            rtc_configuration=RTC_CONFIGURATION,
+            media_stream_constraints={"audio": True, "video": False},
+            async_processing=False,
+        )
+
+        st.write("If the WebRTC widget is available above, click Start then use the Record button below.")
+        record_seconds = st.number_input("Record duration (seconds)", min_value=1, max_value=30, value=5, step=1)
+
+        if st.button("Record using WebRTC"):
+            if webrtc_ctx and webrtc_ctx.state.playing:
+                st.info(f"Recording {record_seconds}s — speak now")
+                frames = []
+                start = time.time()
+                while time.time() - start < float(record_seconds):
+                    try:
+                        new_frames = webrtc_ctx.audio_receiver.get_frames(timeout=1.0)
+                    except Exception:
+                        new_frames = []
+                    if new_frames:
+                        frames.extend(new_frames)
+                if not frames:
+                    st.error("No frames captured. Try allowing microphone or use upload fallback below.")
+                else:
+                    # convert frames -> wav bytes (simple path using soundfile)
+                    chunks = []
+                    sr_rate = None
+                    for frame in frames:
+                        try:
+                            arr = frame.to_ndarray()
+                        except Exception:
+                            arr = np.asarray(frame)
+                        if arr.ndim == 2:
+                            arr = np.mean(arr, axis=0)
+                        chunks.append(arr)
+                        if sr_rate is None:
+                            try:
+                                sr_rate = frame.sample_rate
+                            except Exception:
+                                sr_rate = 48000
+                    audio_np = np.concatenate(chunks).astype(np.float32)
+                    bio = io.BytesIO()
+                    sf.write(bio, audio_np, sr_rate, format="WAV")
+                    wav_bytes = bio.getvalue()
+                    last_audio_preview = wav_bytes
+                    st.audio(wav_bytes, format="audio/wav")
+                    st.write("Transcribing...")
+                    transcript = transcribe_wav_bytes(wav_bytes)
+            else:
+                st.error("WebRTC streamer is not running. Use the upload fallback below.")
+    except Exception as e:
+        # Catch internal streamlit-webrtc runtime issues (like the thread AttributeError)
+        st.error("WebRTC recording failed to initialize — falling back to upload-only mode.")
+        st.exception(e)
+        webrtc_available = False
+
+# --- Upload fallback (always available) ---
+st.markdown("### Fallback: upload an audio file")
+uploaded = st.file_uploader("Upload audio (wav, mp3, m4a, webm)", type=["wav", "mp3", "m4a", "webm"])
+if uploaded is not None:
+    st.write("Processing uploaded file...")
+    raw = uploaded.read()
+    last_audio_preview = raw
+    try:
+        seg = AudioSegment.from_file(io.BytesIO(raw))
         bio = io.BytesIO()
         seg.export(bio, format="wav")
         wavbytes = bio.getvalue()
         st.audio(wavbytes)
-        text_out = transcribe_wav_bytes(wavbytes)
-        st.subheader("Transcription result")
-        st.write(text_out)
-        if st.button("Put transcription into TTS text area (uploaded)"):
-            st.session_state["tts_text"] = text_out
-            st.success("Transcription placed into TTS text area.")
-            st.experimental_rerun()
+        transcript = transcribe_wav_bytes(wavbytes)
     except Exception as e:
-        st.error(f"Failed to convert/upload audio: {e}")
+        st.error(f"Upload conversion/transcription failed: {e}")
 
-st.caption("Dependencies: streamlit, streamlit-webrtc, soundfile, numpy, SpeechRecognition, pydub, gTTS. System dependency: ffmpeg.")
+# Show preview and transcript
+if last_audio_preview:
+    st.subheader("Preview recorded/uploaded audio")
+    st.audio(last_audio_preview)
+
+if transcript:
+    st.subheader("Transcription result")
+    st.write(transcript)
+    if st.button("Put transcription into TTS text area"):
+        st.session_state["tts_text"] = transcript
+        st.success("Transcription placed into TTS text area.")
+        st.experimental_rerun()
+
+st.caption("If WebRTC fails repeatedly on Streamlit Cloud, use the upload fallback. For persistent WebRTC problems, try adjusting streamlit-webrtc version or removing soundfile and using pydub-only conversion.")
