@@ -1,6 +1,7 @@
 streamlit>=1.24.0
-gTTS>=2.3.0
+streamlit-webrtc>=0.63.0
+soundfile>=0.12.1
+numpy>=1.25.0
 SpeechRecognition>=3.8.1
 pydub>=0.25.1
-audio-recorder-streamlit==0.0.10
-git+https://github.com/SamuelAnand10/audio-recorder-streamlit.git@app.py#egg=audio-recorder-streamlit
+gTTS>=2.3.0
