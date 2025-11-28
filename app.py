@@ -1,44 +1,36 @@
-import base64
 import streamlit as st
-import asyncio
+from gtts import gTTS
 import tempfile
-from edge_tts import Communicate
+import base64
+import os
 
-async def _synthesize_to_file(text_or_ssml: str, voice: str, out_path: str):
-    communicator = Communicate(text_or_ssml, voice)
-    await communicator.save(out_path)
+st.set_page_config(page_title="gTTS Autoplay", layout="centered")
+st.title("gTTS — Autoplay Mode")
 
-def synthesize_to_file(text_or_ssml: str, voice="en-US-AriaNeural"):
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-    tmp_path = tmp.name
-    tmp.close()
-    asyncio.run(_synthesize_to_file(text_or_ssml, voice, tmp_path))
-    return tmp_path
-
-def autoplay_html(mp3_path: str):
-    # Read file and convert to base64
-    with open(mp3_path, "rb") as f:
-        mp3_bytes = f.read()
-    b64 = base64.b64encode(mp3_bytes).decode()
-
-    # Autoplay HTML audio element
-    html = f"""
-    <audio autoplay="true">
-        <source src="data:audio/mp3;base64,{b64}" type="audio/mp3">
-    </audio>
-    """
-    st.markdown(html, unsafe_allow_html=True)
-
-# ----------------------
-# STREAMLIT UI
-# ----------------------
-st.title("Edge TTS — Autoplay Mode")
-
-voice = st.selectbox("Voice", ["en-US-AriaNeural", "en-GB-LibbyNeural", "en-US-GuyNeural"])
-
+# UI
+lang = st.selectbox("Language", ["en", "en-uk", "en-us"])
 text = st.text_area("Text", "Hi there, I'm your personal assistant.")
 
-if st.button("Speak"):
-    mp3_path = synthesize_to_file(text, voice)
-    autoplay_html(mp3_path)
-    st.success("Done! Audio should autoplay 🎧🔥")
+def autoplay_audio(mp3_path):
+    with open(mp3_path, "rb") as f:
+        audio_bytes = f.read()
+    b64 = base64.b64encode(audio_bytes).decode()
+    st.markdown(
+        f"""
+        <audio autoplay controls>
+            <source src="data:audio/mp3;base64,{b64}" type="audio/mp3">
+        </audio>
+        """,
+        unsafe_allow_html=True
+    )
+
+if st.button("Speak", key="speak_btn"):
+    if not text.strip():
+        st.warning("Please enter some text.")
+    else:
+        tts = gTTS(text=text, lang="en")
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+        tts.save(tmp.name)
+
+        autoplay_audio(tmp.name)
+        st.success("Done! Your audio is playing automatically.")
