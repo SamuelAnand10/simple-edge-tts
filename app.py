@@ -1,36 +1,28 @@
 # streamlit_gtts_stt_safe.py
 """
-Safe STT+TTS app:
-- Attempts to use streamlit-webrtc; if it errors, falls back to upload-only STT.
-- Puts transcript into TTS text area (session_state).
-- Uses SpeechRecognition (Google) and pydub for conversions.
+streamlit_gtts_stt_htmlrecorder.py
+
+- Uses a pure-HTML/JS in-page recorder (MediaRecorder). The JS provides a Download link for the recorded file.
+- The user then uploads that file with the file uploader (or use any recorded file).
+- The app converts the uploaded file to WAV via pydub and transcribes with SpeechRecognition (Google).
+- Transcription can be placed into the TTS text area and played with gTTS.
+
+Notes:
+- This avoids installing fragile recorder libraries.
+- pydub requires ffmpeg (add packages.txt with 'ffmpeg' on Streamlit Cloud).
 """
 
 import streamlit as st
 from gtts import gTTS
-import tempfile, os, io, base64, time
-import numpy as np
-
-# Try to import webrtc; we'll handle absence or runtime exceptions gracefully
-webrtc_available = True
-try:
-    from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
-except Exception as e:
-    webrtc_available = False
-    webrtc_import_error = e
-
-# STT deps
-import speech_recognition as sr
+import base64, tempfile, os, io
 from pydub import AudioSegment
+import speech_recognition as sr
 
-# Optional: soundfile fallback removal to reduce system deps
-import soundfile as sf
-
-st.set_page_config(page_title="gTTS + STT (safe)", layout="centered")
-st.title("gTTS — Autoplay + STT (robust)")
+st.set_page_config(page_title="gTTS + STT (HTML Recorder + Upload)", layout="centered")
+st.title("gTTS — Autoplay Mode + STT (HTML Recorder + Upload)")
 
 # -------------------------
-# TTS UI (session_state-backed)
+# TTS section (session_state-backed)
 # -------------------------
 if "tts_text" not in st.session_state:
     st.session_state["tts_text"] = "Hi there, I'm your personal assistant."
@@ -60,7 +52,7 @@ if st.button("Speak (TTS)"):
             tts.save(tmp.name)
             with open(tmp.name, "rb") as f:
                 autoplay_audio_bytes(f.read())
-            st.success("Done! Audio playing.")
+            st.success("Done! Your audio is playing automatically.")
         finally:
             try:
                 tmp.close(); os.unlink(tmp.name)
@@ -70,125 +62,149 @@ if st.button("Speak (TTS)"):
 st.markdown("---")
 
 # -------------------------
-# STT logic (webrtc attempt + fallback)
+# HTML recorder UI
 # -------------------------
-st.header("Speech-to-Text (STT)")
+st.header("Record in your browser (HTML recorder)")
 
-recog = sr.Recognizer()
+st.write(
+    "Click **Record** below, speak, then **Stop**. "
+    "Click **Download** to save the file, then upload the saved file with the uploader below for transcription."
+)
 
-def transcribe_wav_bytes(wav_bytes: bytes) -> str:
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-    try:
-        tmp.write(wav_bytes)
-        tmp.flush()
-        tmp.close()
-        with sr.AudioFile(tmp.name) as source:
-            audio_data = recog.record(source)
-        try:
-            return recog.recognize_google(audio_data)
-        except sr.UnknownValueError:
-            return "(Could not understand audio)"
-        except sr.RequestError as e:
-            return f"(Could not request results; {e})"
-    finally:
-        try:
-            os.unlink(tmp.name)
-        except Exception:
-            pass
+# Simple HTML + JS recorder using MediaRecorder
+RECORDER_HTML = r"""
+<style>
+.rec-btn { padding:8px 12px; margin:6px; font-size:14px; }
+#controls { margin-top: 8px; }
+#audioPlayer { margin-top: 10px; width: 100%; }
+</style>
 
-transcript = None
-last_audio_preview = None
+<div>
+  <button id="recordBtn" class="rec-btn">Start Recording</button>
+  <button id="stopBtn" class="rec-btn" disabled>Stop</button>
+  <button id="playBtn" class="rec-btn" disabled>Play</button>
+  <a id="downloadLink" style="display:none; margin-left: 10px;">Download</a>
+  <p id="status" style="font-size:13px; color:#333;"></p>
+  <audio id="audioPlayer" controls></audio>
+</div>
 
-# --- Try webrtc, but guard against runtime errors ---
-if webrtc_available:
-    try:
-        RTC_CONFIGURATION = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
-        webrtc_ctx = webrtc_streamer(
-            key="stt",
-            mode=WebRtcMode.SENDONLY,
-            rtc_configuration=RTC_CONFIGURATION,
-            media_stream_constraints={"audio": True, "video": False},
-            async_processing=False,
-        )
+<script>
+let mediaRecorder;
+let audioChunks = [];
+const recordBtn = document.getElementById('recordBtn');
+const stopBtn = document.getElementById('stopBtn');
+const playBtn = document.getElementById('playBtn');
+const downloadLink = document.getElementById('downloadLink');
+const status = document.getElementById('status');
+const audioPlayer = document.getElementById('audioPlayer');
 
-        st.write("If the WebRTC widget is available above, click Start then use the Record button below.")
-        record_seconds = st.number_input("Record duration (seconds)", min_value=1, max_value=30, value=5, step=1)
+recordBtn.onclick = async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaRecorder = new MediaRecorder(stream);
+    audioChunks = [];
+    mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+    mediaRecorder.onstart = () => {
+      status.textContent = 'Recording...';
+      recordBtn.disabled = true;
+      stopBtn.disabled = false;
+      playBtn.disabled = true;
+      downloadLink.style.display = 'none';
+    };
+    mediaRecorder.onstop = () => {
+      const blob = new Blob(audioChunks, { type: 'audio/webm' });
+      const url = URL.createObjectURL(blob);
+      audioPlayer.src = url;
+      playBtn.disabled = false;
+      downloadLink.href = url;
+      // default filename
+      downloadLink.download = 'recording.webm';
+      downloadLink.style.display = 'inline';
+      downloadLink.textContent = 'Download (save & upload)';
+      status.textContent = 'Recording stopped. Click Download to save the file, then upload it below.';
+    };
+    mediaRecorder.start();
+  } catch (err) {
+    status.textContent = 'Microphone access denied or not available. Use the upload fallback below.';
+  }
+};
 
-        if st.button("Record using WebRTC"):
-            if webrtc_ctx and webrtc_ctx.state.playing:
-                st.info(f"Recording {record_seconds}s — speak now")
-                frames = []
-                start = time.time()
-                while time.time() - start < float(record_seconds):
-                    try:
-                        new_frames = webrtc_ctx.audio_receiver.get_frames(timeout=1.0)
-                    except Exception:
-                        new_frames = []
-                    if new_frames:
-                        frames.extend(new_frames)
-                if not frames:
-                    st.error("No frames captured. Try allowing microphone or use upload fallback below.")
-                else:
-                    # convert frames -> wav bytes (simple path using soundfile)
-                    chunks = []
-                    sr_rate = None
-                    for frame in frames:
-                        try:
-                            arr = frame.to_ndarray()
-                        except Exception:
-                            arr = np.asarray(frame)
-                        if arr.ndim == 2:
-                            arr = np.mean(arr, axis=0)
-                        chunks.append(arr)
-                        if sr_rate is None:
-                            try:
-                                sr_rate = frame.sample_rate
-                            except Exception:
-                                sr_rate = 48000
-                    audio_np = np.concatenate(chunks).astype(np.float32)
-                    bio = io.BytesIO()
-                    sf.write(bio, audio_np, sr_rate, format="WAV")
-                    wav_bytes = bio.getvalue()
-                    last_audio_preview = wav_bytes
-                    st.audio(wav_bytes, format="audio/wav")
-                    st.write("Transcribing...")
-                    transcript = transcribe_wav_bytes(wav_bytes)
-            else:
-                st.error("WebRTC streamer is not running. Use the upload fallback below.")
-    except Exception as e:
-        # Catch internal streamlit-webrtc runtime issues (like the thread AttributeError)
-        st.error("WebRTC recording failed to initialize — falling back to upload-only mode.")
-        st.exception(e)
-        webrtc_available = False
+stopBtn.onclick = () => {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop();
+  }
+  recordBtn.disabled = false;
+  stopBtn.disabled = true;
+};
 
-# --- Upload fallback (always available) ---
-st.markdown("### Fallback: upload an audio file")
-uploaded = st.file_uploader("Upload audio (wav, mp3, m4a, webm)", type=["wav", "mp3", "m4a", "webm"])
+playBtn.onclick = () => {
+  if (audioPlayer.src) {
+    audioPlayer.play();
+  }
+};
+</script>
+"""
+
+# Render HTML recorder
+st.components.v1.html(RECORDER_HTML, height=220)
+
+st.markdown("---")
+
+# -------------------------
+# Upload fallback & transcription
+# -------------------------
+st.header("Upload recorded file for transcription")
+st.write(
+    "Upload the file you downloaded from the recorder (or any audio file). "
+    "Supported types: wav, mp3, m4a, webm, ogg."
+)
+
+uploaded = st.file_uploader("Upload recorded audio (from the Download link above)", type=["wav", "mp3", "m4a", "webm", "ogg"])
 if uploaded is not None:
-    st.write("Processing uploaded file...")
-    raw = uploaded.read()
-    last_audio_preview = raw
+    st.info("File uploaded — processing...")
     try:
-        seg = AudioSegment.from_file(io.BytesIO(raw))
+        # Read bytes and normalize/convert with pydub (requires ffmpeg)
+        in_bytes = uploaded.read()
+        audio_seg = AudioSegment.from_file(io.BytesIO(in_bytes))
+        # export to wav bytes
         bio = io.BytesIO()
-        seg.export(bio, format="wav")
-        wavbytes = bio.getvalue()
-        st.audio(wavbytes)
-        transcript = transcribe_wav_bytes(wavbytes)
+        audio_seg.export(bio, format="wav")
+        wav_bytes = bio.getvalue()
+
+        # Play preview in the app
+        st.audio(wav_bytes, format="audio/wav")
+
+        # Transcribe using SpeechRecognition
+        r = sr.Recognizer()
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+        try:
+            tmp.write(wav_bytes)
+            tmp.flush()
+            tmp.close()
+            with sr.AudioFile(tmp.name) as source:
+                audio_data = r.record(source)
+            try:
+                transcript = r.recognize_google(audio_data)
+            except sr.UnknownValueError:
+                transcript = "(Could not understand audio)"
+            except sr.RequestError as e:
+                transcript = f"(Could not request results; {e})"
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except Exception:
+                pass
+
+        st.subheader("Transcription result")
+        st.write(transcript)
+
+        if st.button("Put transcription into TTS text area"):
+            st.session_state["tts_text"] = transcript
+            st.success("Transcription placed into the TTS text area.")
+            st.experimental_rerun()
+
     except Exception as e:
-        st.error(f"Upload conversion/transcription failed: {e}")
+        st.error(f"Failed to process uploaded audio: {e}")
 
-# Show preview and transcript
-if last_audio_preview:
-    st.subheader("Preview recorded/uploaded audio")
-    st.audio(last_audio_preview)
-
-if transcript:
-    st.subheader("Transcription result")
-    st.write(transcript)
-    if st.button("Put transcription into TTS text area"):
-        st.session_state["tts_text"] = transcript
-        st.success("Transcription placed into TTS text area.")
-        st.experimental_rerun()
-
-st.caption("If WebRTC fails repeatedly on Streamlit Cloud, use the upload fallback. For persistent WebRTC problems, try adjusting streamlit-webrtc version or removing soundfile and using pydub-only conversion.")
+st.markdown("---")
+st.caption("Dependencies: streamlit, gTTS, pydub, SpeechRecognition. System dependency: ffmpeg (for pydub).")
